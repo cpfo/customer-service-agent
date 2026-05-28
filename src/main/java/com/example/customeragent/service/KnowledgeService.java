@@ -31,16 +31,14 @@ public class KnowledgeService implements CommandLineRunner {
     private final VectorStore vectorStore;
     private final StringRedisTemplate redisTemplate;
     private final DocumentStore documentStore;
-    private final BM25Index bm25Index;
     private final ObjectMapper objectMapper;
 
     public KnowledgeService(VectorStore vectorStore, StringRedisTemplate redisTemplate,
-                            DocumentStore documentStore, BM25Index bm25Index,
+                            DocumentStore documentStore,
                             ObjectMapper objectMapper) {
         this.vectorStore = vectorStore;
         this.redisTemplate = redisTemplate;
         this.documentStore = documentStore;
-        this.bm25Index = bm25Index;
         this.objectMapper = objectMapper;
     }
 
@@ -113,9 +111,6 @@ public class KnowledgeService implements CommandLineRunner {
         redisTemplate.opsForSet().remove(FILES_SET_KEY, filename);
         redisTemplate.delete(FILE_META_PREFIX + filename);
 
-        if (bm25Index.isBuilt()) {
-            bm25Index.rebuild();
-        }
         log.info("已删除知识库文件: {}", filename);
         return true;
     }
@@ -191,9 +186,6 @@ public class KnowledgeService implements CommandLineRunner {
     private void addToStores(List<Document> chunks) {
         vectorStore.add(chunks);
         documentStore.addAll(chunks);
-        if (bm25Index.isBuilt()) {
-            bm25Index.rebuild();
-        }
     }
 
     private void trackFileInRedis(String filename, List<Document> chunks, String timestamp) {

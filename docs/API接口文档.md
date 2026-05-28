@@ -49,7 +49,7 @@ Content-Type: text/plain;charset=UTF-8
 #### 流程说明
 
 ```
-请求 → 缓存查询 → 查询改写 → 多路召回(向量+BM25) → RRF融合 → 重排序
+请求 → 缓存查询 → 查询改写 → 向量检索 → 重排序
 → 人工转接检测 → LLM调用(含重试) → 写入缓存 → 保存会话 → 返回
 ```
 
@@ -165,7 +165,7 @@ curl "http://localhost:8080/api/knowledge"
 
 `POST /api/knowledge`
 
-上传文档文件，自动解析为文本，分块后写入向量库和 BM25 索引。
+上传文档文件，自动解析为文本，分块后写入向量库。
 
 #### 请求
 
@@ -250,7 +250,7 @@ curl "http://localhost:8080/api/knowledge/faq.txt"
 
 `DELETE /api/knowledge/{filename}`
 
-从向量库和 BM25 索引中删除指定文件。
+从向量库中删除指定文件。
 
 #### 请求示例
 

@@ -101,7 +101,7 @@ public class KnowledgeController {
     }
 
     @DeleteMapping("/{filename}")
-    @Operation(summary = "删除知识库文件", description = "从向量库、DocumentStore 和 BM25 索引中删除指定文件的所有文档块。")
+    @Operation(summary = "删除知识库文件", description = "从向量库和 DocumentStore 中删除指定文件的所有文档块。")
     public ResponseEntity<?> deleteFile(
             @Parameter(description = "文件名（含扩展名）", example = "faq.txt")
             @PathVariable String filename) {
