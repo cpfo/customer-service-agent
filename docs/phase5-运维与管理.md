@@ -11,14 +11,14 @@
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/knowledge` | GET | 列出已加载知识库文档清单及元数据 |
-| `/api/knowledge` | POST | 上传文档文件（multipart/form-data），解析后加入向量库和 BM25 索引 |
+| `/api/knowledge` | POST | 上传文档文件（multipart/form-data），解析后加入向量库和 DocumentStore |
 | `/api/knowledge/{filename}` | GET | 查看指定文件的内容预览 |
 | `/api/knowledge/{filename}` | DELETE | 从向量库和 DocumentStore 删除指定文件 |
 | `/api/knowledge/reload` | POST | 清空所有知识，重新扫描 classpath:knowledge/ |
 
 - 上传文件自动分配 `{filename}#{index}` 格式的块 ID
 - 块 ID 和元数据存储在 Redis（`app:knowledge:files` SET + `app:knowledge:meta:{filename}` Hash）
-- 删除时先根据元数据查询块 ID → `VectorStore.delete()` → DocumentStore 移除 → BM25 重建
+- 删除时先根据元数据查询块 ID → `VectorStore.delete()` → DocumentStore 移除
 - 所有操作线程安全（synchronized）
 
 ### 2. 请求缓存 — `ChatCacheService`

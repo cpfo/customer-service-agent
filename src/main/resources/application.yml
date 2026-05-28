@@ -24,11 +24,7 @@ server:
 app:
   retrieval:
     vector-top-k: 10
-    bm25-enabled: true
-    bm25-top-k: 10
     fusion-top-k: 10
-    vector-weight: 0.5
-    bm25-weight: 0.5
 
   reranker:
     type: cross-encoder
