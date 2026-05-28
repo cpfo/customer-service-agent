@@ -25,10 +25,15 @@ public class KnowledgeService implements CommandLineRunner {
 
     private final VectorStore vectorStore;
     private final StringRedisTemplate redisTemplate;
+    private final DocumentStore documentStore;
+    private final BM25Index bm25Index;
 
-    public KnowledgeService(VectorStore vectorStore, StringRedisTemplate redisTemplate) {
+    public KnowledgeService(VectorStore vectorStore, StringRedisTemplate redisTemplate,
+                            DocumentStore documentStore, BM25Index bm25Index) {
         this.vectorStore = vectorStore;
         this.redisTemplate = redisTemplate;
+        this.documentStore = documentStore;
+        this.bm25Index = bm25Index;
     }
 
     @Override
@@ -61,8 +66,12 @@ public class KnowledgeService implements CommandLineRunner {
             }
 
             vectorStore.add(allChunks);
+            documentStore.addAll(allChunks);
+            bm25Index.rebuild();
+
             redisTemplate.opsForValue().set(INIT_FLAG_KEY, "true");
-            log.info("知识库加载完成，共 {} 个文档块 (来源: {} 个文件)，已标记初始化", allChunks.size(), resources.size());
+            log.info("知识库加载完成，共 {} 个文档块 (来源: {} 个文件)，已标记初始化，DocumentStore/BM25Index 已更新",
+                    allChunks.size(), resources.size());
         } catch (Exception e) {
             log.error("加载知识库失败", e);
         }

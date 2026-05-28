@@ -4,7 +4,7 @@ spring:
       api-key: ${AI_DASHSCOPE_API_KEY}
       chat:
         options:
-          model: qwen-max
+          model: qwen-flash
       embedding:
         options:
           model: text-embedding-v3
@@ -17,8 +17,24 @@ server:
   port: 8080
 
 app:
+  retrieval:
+    vector-top-k: 10
+    bm25-enabled: true
+    bm25-top-k: 10
+    fusion-top-k: 10
+    vector-weight: 0.5
+    bm25-weight: 0.5
+
   reranker:
+    type: cross-encoder
     top-k: 3
-    retrieve-top-k: 10
+    cross-encoder-model: gte-rerank
+
+  query-rewriting:
+    enabled: true
+    num-rewrites: 2
+
+  context-compression:
+    enabled: true
 
 

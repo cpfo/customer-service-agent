@@ -15,7 +15,7 @@
     <artifactId>customer-service-agent</artifactId>
     <version>1.0.0</version>
     <name>customer-service-agent</name>
-    <description>智能客服 AI Agent - Phase 3 (RAG + Redis 向量库 + 多轮对话)</description>
+    <description>智能客服 AI Agent - Phase 4 (RAG + Redis + 交叉编码器重排序 + 查询改写 + 多路召回 + 上下文压缩)</description>
 
     <properties>
         <java.version>17</java.version>

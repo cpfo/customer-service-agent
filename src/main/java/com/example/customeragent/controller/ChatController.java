@@ -1,8 +1,6 @@
 package com.example.customeragent.controller;
 
-import com.example.customeragent.service.CustomerTools;
-import com.example.customeragent.service.ReRankerService;
-import com.example.customeragent.service.SessionService;
+import com.example.customeragent.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,9 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
@@ -60,28 +56,57 @@ public class ChatController {
             不要编造信息。你可以使用提供的工具查询订单状态、物流信息、处理退货申请。
             """;
 
+    private static final double RRF_K = 60.0;
+
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
     private final ReRankerService reRankerService;
     private final SessionService sessionService;
     private final CustomerTools customerTools;
+    private final QueryRewriter queryRewriter;
+    private final BM25Index bm25Index;
+    private final ContextCompressor contextCompressor;
     private final ObjectMapper objectMapper;
-    private final int retrieveTopK;
+    private final int vectorTopK;
+    private final int bm25TopK;
+    private final int fusionTopK;
+    private final double vectorWeight;
+    private final double bm25Weight;
+    private final boolean bm25Enabled;
+    private final boolean rewritingEnabled;
 
     public ChatController(ChatClient chatClient,
                           VectorStore vectorStore,
                           ReRankerService reRankerService,
                           SessionService sessionService,
                           CustomerTools customerTools,
+                          QueryRewriter queryRewriter,
+                          BM25Index bm25Index,
+                          ContextCompressor contextCompressor,
                           ObjectMapper objectMapper,
-                          @Value("${app.reranker.retrieve-top-k:10}") int retrieveTopK) {
+                          @Value("${app.retrieval.vector-top-k:10}") int vectorTopK,
+                          @Value("${app.retrieval.bm25-top-k:10}") int bm25TopK,
+                          @Value("${app.retrieval.fusion-top-k:10}") int fusionTopK,
+                          @Value("${app.retrieval.vector-weight:0.5}") double vectorWeight,
+                          @Value("${app.retrieval.bm25-weight:0.5}") double bm25Weight,
+                          @Value("${app.retrieval.bm25-enabled:true}") boolean bm25Enabled,
+                          @Value("${app.query-rewriting.enabled:true}") boolean rewritingEnabled) {
         this.chatClient = chatClient;
         this.vectorStore = vectorStore;
         this.reRankerService = reRankerService;
         this.sessionService = sessionService;
         this.customerTools = customerTools;
+        this.queryRewriter = queryRewriter;
+        this.bm25Index = bm25Index;
+        this.contextCompressor = contextCompressor;
         this.objectMapper = objectMapper;
-        this.retrieveTopK = retrieveTopK;
+        this.vectorTopK = vectorTopK;
+        this.bm25TopK = bm25TopK;
+        this.fusionTopK = fusionTopK;
+        this.vectorWeight = vectorWeight;
+        this.bm25Weight = bm25Weight;
+        this.bm25Enabled = bm25Enabled;
+        this.rewritingEnabled = rewritingEnabled;
     }
 
     @GetMapping
@@ -181,11 +206,30 @@ public class ChatController {
     }
 
     private RAGContext buildRAGContext(String message, String sessionId) {
-        List<Document> docs = vectorStore.similaritySearch(
-                SearchRequest.builder().query(message).topK(retrieveTopK).build());
-        log.info("向量库检索到 {} 条文档", docs.size());
 
-        List<Document> reranked = reRankerService.reRank(message, docs);
+        List<String> queries = queryRewriter.rewrite(message);
+        log.info("查询改写: {} 条查询", queries.size());
+
+        List<Document> vectorDocs = retrieveVector(queries.get(0));
+        log.info("向量检索到 {} 条文档", vectorDocs.size());
+
+        List<Document> bm25Docs = new ArrayList<>();
+        if (bm25Enabled && bm25Index.isBuilt()) {
+            for (String q : queries) {
+                List<Document> docs = bm25Index.search(q, bm25TopK);
+                bm25Docs.addAll(docs);
+                log.debug("BM25 检索 \"{}\" 得到 {} 条", truncate(q, 30), docs.size());
+            }
+            bm25Docs = bm25Docs.stream()
+                    .distinct()
+                    .collect(Collectors.toList());
+            log.info("BM25 多路检索共 {} 条（去重后）", bm25Docs.size());
+        }
+
+        List<Document> fused = fuseResults(vectorDocs, bm25Docs, queries.get(0));
+        log.info("多路融合后：{} 条文档", fused.size());
+
+        List<Document> reranked = reRankerService.reRank(queries.get(0), fused);
         log.info("重排序后保留 {} 条文档", reranked.size());
 
         String systemPrompt;
@@ -203,7 +247,70 @@ public class ChatController {
         List<Message> history = sessionService.getHistory(sessionId);
         log.info("历史消息数: {}", history.size());
 
+        String compressedHistory = contextCompressor.compress(history);
+        log.info("上下文压缩完成，长度: {} 字符", compressedHistory.length());
+
         return new RAGContext(systemPrompt, history);
+    }
+
+    private List<Document> retrieveVector(String query) {
+        return vectorStore.similaritySearch(
+                SearchRequest.builder().query(query).topK(vectorTopK).build());
+    }
+
+    private List<Document> fuseResults(List<Document> vectorDocs, List<Document> bm25Docs, String query) {
+        if (!bm25Enabled || bm25Docs.isEmpty()) {
+            return vectorDocs;
+        }
+        if (vectorDocs.isEmpty()) {
+            return bm25Docs;
+        }
+
+        Map<String, Document> docMap = new LinkedHashMap<>();
+        Map<String, Double> rrfScores = new HashMap<>();
+
+        Set<String> vectorIds = new LinkedHashSet<>();
+        for (int i = 0; i < vectorDocs.size(); i++) {
+            String id = docId(vectorDocs.get(i), i + "_v");
+            vectorIds.add(id);
+            docMap.put(id, vectorDocs.get(i));
+            rrfScores.merge(id, vectorWeight / (RRF_K + i + 1), Double::sum);
+        }
+        log.debug("RRF 向量贡献: {} 条", vectorIds.size());
+
+        Set<String> bm25Ids = new LinkedHashSet<>();
+        for (int i = 0; i < bm25Docs.size(); i++) {
+            String id = docId(bm25Docs.get(i), i + "_b");
+            bm25Ids.add(id);
+            if (!docMap.containsKey(id)) {
+                docMap.put(id, bm25Docs.get(i));
+            }
+            rrfScores.merge(id, bm25Weight / (RRF_K + i + 1), Double::sum);
+        }
+        log.debug("RRF BM25 贡献: {} 条", bm25Ids.size());
+
+        int overlap = 0;
+        for (String id : vectorIds) {
+            if (bm25Ids.contains(id)) overlap++;
+        }
+        log.info("RRF 融合: 向量{}条 + BM25{}条 = {}条唯一(交集{}), topK={}",
+                vectorDocs.size(), bm25Docs.size(), docMap.size(), overlap, fusionTopK);
+
+        return rrfScores.entrySet().stream()
+                .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+                .limit(fusionTopK)
+                .map(e -> docMap.get(e.getKey()))
+                .collect(Collectors.toList());
+    }
+
+    private String docId(Document doc, String fallback) {
+        Object id = doc.getMetadata().get("id");
+        if (id != null) return id.toString();
+        String text = doc.getText();
+        if (text != null && text.length() > 20) {
+            return text.substring(0, 20);
+        }
+        return fallback;
     }
 
     private String truncate(String text, int maxLen) {
