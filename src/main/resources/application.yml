@@ -1,0 +1,18 @@
+spring:
+  ai:
+    dashscope:
+      api-key: ${AI_DASHSCOPE_API_KEY}
+      chat:
+        options:
+          model: qwen-max
+      embedding:
+        options:
+          model: text-embedding-v3
+  output:
+    ansi:
+      enabled: always
+
+server:
+  port: 8080
+
+
