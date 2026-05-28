@@ -1,6 +1,7 @@
 package com.example.customeragent.controller;
 
 import com.example.customeragent.service.ReRankerService;
+import com.example.customeragent.service.SessionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -17,7 +18,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @RestController
@@ -55,16 +55,18 @@ public class ChatController {
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
     private final ReRankerService reRankerService;
+    private final SessionService sessionService;
     private final int retrieveTopK;
-    private final Map<String, List<Message>> sessions = new ConcurrentHashMap<>();
 
     public ChatController(ChatClient chatClient,
                           VectorStore vectorStore,
                           ReRankerService reRankerService,
+                          SessionService sessionService,
                           @Value("${app.reranker.retrieve-top-k:10}") int retrieveTopK) {
         this.chatClient = chatClient;
         this.vectorStore = vectorStore;
         this.reRankerService = reRankerService;
+        this.sessionService = sessionService;
         this.retrieveTopK = retrieveTopK;
     }
 
@@ -94,14 +96,11 @@ public class ChatController {
             log.info("未检索到相关知识，使用无上下文 system prompt");
         }
 
-        List<Message> history = sessions.getOrDefault(sessionId, new ArrayList<>());
-        List<Message> recentHistory = history.size() > 10
-                ? history.subList(history.size() - 10, history.size())
-                : history;
-        log.info("历史消息数: {}", recentHistory.size());
+        List<Message> history = sessionService.getHistory(sessionId);
+        log.info("历史消息数: {}", history.size());
         if (log.isDebugEnabled()) {
-            for (int i = 0; i < recentHistory.size(); i++) {
-                Message msg = recentHistory.get(i);
+            for (int i = 0; i < history.size(); i++) {
+                Message msg = history.get(i);
                 log.debug("历史[{}] {}: {}", i,
                         msg.getMessageType(),
                         truncate(msg.getText(), 100));
@@ -112,7 +111,7 @@ public class ChatController {
 
         String reply = chatClient.prompt()
                 .system(systemPrompt)
-                .messages(recentHistory)
+                .messages(history)
                 .user(message)
                 .call()
                 .content();
@@ -120,9 +119,7 @@ public class ChatController {
         log.info("模型回复: {}", truncate(reply, 200));
         log.debug("模型回复(完整):\n{}", reply);
 
-        history.add(new UserMessage(message));
-        history.add(new AssistantMessage(reply));
-        sessions.put(sessionId, history);
+        sessionService.saveExchange(sessionId, new UserMessage(message), new AssistantMessage(reply));
 
         log.info("=== 请求结束 [{}] ===", sessionId);
         return reply;
