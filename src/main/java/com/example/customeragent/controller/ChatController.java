@@ -71,9 +71,15 @@ public class ChatController {
     @GetMapping
     public String chat(@RequestParam(defaultValue = "default") String sessionId,
                        @RequestParam String message) {
+        log.info("=== 请求开始 [{}] ===", sessionId);
+        log.info("用户消息: {}", message);
+
         List<Document> docs = vectorStore.similaritySearch(
                 SearchRequest.builder().query(message).topK(retrieveTopK).build());
+        log.info("向量库检索到 {} 条文档", docs.size());
+
         List<Document> reranked = reRankerService.reRank(message, docs);
+        log.info("重排序后保留 {} 条文档", reranked.size());
 
         String systemPrompt;
         if (!reranked.isEmpty()) {
@@ -81,16 +87,28 @@ public class ChatController {
                     .map(Document::getText)
                     .collect(Collectors.joining("\n---\n"));
             systemPrompt = SYSTEM_PROMPT_TEMPLATE.formatted(context);
+            log.info("使用有上下文的 system prompt，知识长度: {} 字符", context.length());
+            log.debug("知识内容:\n{}", context);
         } else {
             systemPrompt = NO_CONTEXT_PROMPT;
+            log.info("未检索到相关知识，使用无上下文 system prompt");
         }
 
         List<Message> history = sessions.getOrDefault(sessionId, new ArrayList<>());
         List<Message> recentHistory = history.size() > 10
                 ? history.subList(history.size() - 10, history.size())
                 : history;
+        log.info("历史消息数: {}", recentHistory.size());
+        if (log.isDebugEnabled()) {
+            for (int i = 0; i < recentHistory.size(); i++) {
+                Message msg = recentHistory.get(i);
+                log.debug("历史[{}] {}: {}", i,
+                        msg.getMessageType(),
+                        truncate(msg.getText(), 100));
+            }
+        }
 
-        log.info("[{}] 用户: {}, 历史消息数: {}", sessionId, message, recentHistory.size());
+        log.debug("system prompt 预览: {}", truncate(systemPrompt, 200));
 
         String reply = chatClient.prompt()
                 .system(systemPrompt)
@@ -99,10 +117,20 @@ public class ChatController {
                 .call()
                 .content();
 
+        log.info("模型回复: {}", truncate(reply, 200));
+        log.debug("模型回复(完整):\n{}", reply);
+
         history.add(new UserMessage(message));
         history.add(new AssistantMessage(reply));
         sessions.put(sessionId, history);
 
+        log.info("=== 请求结束 [{}] ===", sessionId);
         return reply;
+    }
+
+    private String truncate(String text, int maxLen) {
+        if (text == null) return null;
+        if (text.length() <= maxLen) return text;
+        return text.substring(0, maxLen) + "...(共" + text.length() + "字符)";
     }
 }

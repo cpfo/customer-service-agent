@@ -26,14 +26,19 @@ public class ReRankerService {
 
     public List<Document> reRank(String query, List<Document> documents) {
         if (documents == null || documents.isEmpty()) {
+            log.warn("重排序输入为空，查询: {}", truncate(query, 100));
             return List.of();
         }
 
+        log.info("重排序输入: {} 条文档, 查询: \"{}\"", documents.size(), truncate(query, 50));
+
         if (documents.size() <= topK) {
+            log.info("文档数({}) <= topK({}), 跳过重排序", documents.size(), topK);
             return documents;
         }
 
         Set<String> queryTerms = tokenize(query);
+        log.debug("查询分词: {}", queryTerms);
 
         List<Map.Entry<Document, Double>> scored = IntStream.range(0, documents.size())
                 .mapToObj(i -> {
@@ -41,19 +46,37 @@ public class ReRankerService {
                     double vectorScore = Math.max(0, doc.getScore());
                     double keywordScore = computeKeywordOverlap(queryTerms, doc.getText());
                     double combined = vectorScore * VECTOR_WEIGHT + keywordScore * KEYWORD_WEIGHT;
+                    if (log.isTraceEnabled()) {
+                        log.trace("文档[{}] 向量分={} 关键词分={} 综合={} 预览={}",
+                                i, String.format("%.4f", vectorScore),
+                                String.format("%.4f", keywordScore),
+                                String.format("%.4f", combined),
+                                truncate(doc.getText(), 60));
+                    }
                     return new AbstractMap.SimpleEntry<>(doc, combined);
                 })
                 .sorted(Map.Entry.<Document, Double>comparingByValue().reversed())
                 .collect(Collectors.toList());
 
-        log.debug("重排序完成，top1 分数: {}, bottom 分数: {}",
+        int showIdx = Math.min(topK, scored.size()) - 1;
+        log.info("重排序完成, top1: {}, top{}: {}",
                 String.format("%.4f", scored.get(0).getValue()),
-                String.format("%.4f", scored.get(scored.size() - 1).getValue()));
+                showIdx + 1,
+                String.format("%.4f", scored.get(showIdx).getValue()));
 
-        return scored.stream()
+        List<Document> result = scored.stream()
                 .limit(topK)
                 .map(Map.Entry::getKey)
                 .collect(Collectors.toList());
+
+        log.info("重排序输出: {} 条文档", result.size());
+        return result;
+    }
+
+    private String truncate(String text, int maxLen) {
+        if (text == null) return null;
+        if (text.length() <= maxLen) return text;
+        return text.substring(0, maxLen) + "...";
     }
 
     private Set<String> tokenize(String text) {
