@@ -17,7 +17,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/knowledge")
-@Tag(name = "知识库管理", description = "知识库文档的增删查改与重载操作，上传文档自动解析并写入向量库和 BM25 索引")
+@Tag(name = "知识库管理", description = "知识库文档的增删查改与重载操作，上传文档自动解析并写入向量库")
 public class KnowledgeController {
 
     private static final Logger log = LoggerFactory.getLogger(KnowledgeController.class);
@@ -40,7 +40,7 @@ public class KnowledgeController {
     }
 
     @PostMapping
-    @Operation(summary = "上传知识库文档", description = "上传文档文件（txt/pdf/docx/md/html/htm），自动解析为文本、分块后写入向量库和 BM25 索引，上限 10MB。")
+    @Operation(summary = "上传知识库文档", description = "上传文档文件（txt/pdf/docx/md/html/htm），自动解析为文本、分块后写入向量库，上限 10MB。")
     public ResponseEntity<?> uploadFile(
             @Parameter(description = "文档文件，支持 txt/pdf/docx/md/html/htm 格式", required = true)
             @RequestParam("file") MultipartFile file) {
@@ -111,7 +111,7 @@ public class KnowledgeController {
     }
 
     @PostMapping("/reload")
-    @Operation(summary = "重新加载知识库", description = "清空所有已加载的知识库内容，重新扫描 classpath:knowledge/ 下的所有文档文件并重建向量库和 BM25 索引。")
+    @Operation(summary = "重新加载知识库", description = "清空所有已加载的知识库内容，重新扫描 classpath:knowledge/ 下的所有文档文件并重建向量库。")
     public ResponseEntity<?> reloadAll() {
         log.info("重新加载知识库");
         knowledgeService.reloadAll();
