@@ -9,12 +9,14 @@ spring:
         options:
           model: text-embedding-v3
 
+  redis:
+    host: localhost
+    port: 6379
+
 server:
   port: 8080
 
 app:
-  vectorstore:
-    persistence-path: ./data/vector-store.json
   reranker:
     top-k: 3
     retrieve-top-k: 10
