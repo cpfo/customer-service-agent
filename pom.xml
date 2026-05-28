@@ -15,7 +15,7 @@
     <artifactId>customer-service-agent</artifactId>
     <version>1.0.0</version>
     <name>customer-service-agent</name>
-    <description>智能客服 AI Agent - Phase 4 (RAG + Redis + 交叉编码器重排序 + 查询改写 + 多路召回 + 上下文压缩)</description>
+    <description>智能客服 AI Agent - Phase 5 (RAG + Redis + 精度提升 + 知识库管理API + 缓存 + 容错降级 + 可观测性)</description>
 
     <properties>
         <java.version>17</java.version>
@@ -50,6 +50,27 @@
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-tika-document-reader</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.6.0</version>
         </dependency>
 
     </dependencies>

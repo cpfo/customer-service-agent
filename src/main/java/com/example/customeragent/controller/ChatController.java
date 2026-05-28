@@ -2,6 +2,13 @@ package com.example.customeragent.controller;
 
 import com.example.customeragent.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -12,7 +19,6 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -25,6 +31,7 @@ import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/chat")
+@Tag(name = "聊天接口", description = "智能客服对话，支持同步文本和 SSE 流式两种返回方式，集成多轮会话、RAG 检索、Function Calling")
 public class ChatController {
 
     private static final Logger log = LoggerFactory.getLogger(ChatController.class);
@@ -66,6 +73,9 @@ public class ChatController {
     private final QueryRewriter queryRewriter;
     private final BM25Index bm25Index;
     private final ContextCompressor contextCompressor;
+    private final ChatCacheService chatCacheService;
+    private final HumanHandoffService humanHandoffService;
+    private final MetricsService metricsService;
     private final ObjectMapper objectMapper;
     private final int vectorTopK;
     private final int bm25TopK;
@@ -73,7 +83,8 @@ public class ChatController {
     private final double vectorWeight;
     private final double bm25Weight;
     private final boolean bm25Enabled;
-    private final boolean rewritingEnabled;
+    private final boolean fallbackEnabled;
+    private final int maxRetries;
 
     public ChatController(ChatClient chatClient,
                           VectorStore vectorStore,
@@ -83,6 +94,9 @@ public class ChatController {
                           QueryRewriter queryRewriter,
                           BM25Index bm25Index,
                           ContextCompressor contextCompressor,
+                          ChatCacheService chatCacheService,
+                          HumanHandoffService humanHandoffService,
+                          MetricsService metricsService,
                           ObjectMapper objectMapper,
                           @Value("${app.retrieval.vector-top-k:10}") int vectorTopK,
                           @Value("${app.retrieval.bm25-top-k:10}") int bm25TopK,
@@ -90,7 +104,8 @@ public class ChatController {
                           @Value("${app.retrieval.vector-weight:0.5}") double vectorWeight,
                           @Value("${app.retrieval.bm25-weight:0.5}") double bm25Weight,
                           @Value("${app.retrieval.bm25-enabled:true}") boolean bm25Enabled,
-                          @Value("${app.query-rewriting.enabled:true}") boolean rewritingEnabled) {
+                          @Value("${app.fallback.enabled:true}") boolean fallbackEnabled,
+                          @Value("${app.fallback.max-retries:1}") int maxRetries) {
         this.chatClient = chatClient;
         this.vectorStore = vectorStore;
         this.reRankerService = reRankerService;
@@ -99,6 +114,9 @@ public class ChatController {
         this.queryRewriter = queryRewriter;
         this.bm25Index = bm25Index;
         this.contextCompressor = contextCompressor;
+        this.chatCacheService = chatCacheService;
+        this.humanHandoffService = humanHandoffService;
+        this.metricsService = metricsService;
         this.objectMapper = objectMapper;
         this.vectorTopK = vectorTopK;
         this.bm25TopK = bm25TopK;
@@ -106,24 +124,51 @@ public class ChatController {
         this.vectorWeight = vectorWeight;
         this.bm25Weight = bm25Weight;
         this.bm25Enabled = bm25Enabled;
-        this.rewritingEnabled = rewritingEnabled;
+        this.fallbackEnabled = fallbackEnabled;
+        this.maxRetries = maxRetries;
     }
 
     @GetMapping
-    public String chat(@RequestParam(defaultValue = "default") String sessionId,
-                       @RequestParam String message) {
+    @Operation(summary = "同步聊天", description = "发送消息给智能客服，返回纯文本回复。支持多轮对话（sessionId）、RAG 知识库检索、Function Calling。")
+    @ApiResponse(responseCode = "200", description = "成功返回文本回复",
+            content = @Content(mediaType = "text/plain",
+                    examples = @ExampleObject("您好！请问有什么可以帮助您的？")))
+    public String chat(
+            @Parameter(description = "会话 ID，用于维持多轮对话上下文", example = "user123")
+            @RequestParam(defaultValue = "default") String sessionId,
+            @Parameter(description = "用户发送的消息", example = "你们的退货政策是什么？", required = true)
+            @RequestParam String message) {
+        metricsService.incrementRequestTotal();
         log.info("=== 同步请求开始 [{}] ===", sessionId);
         log.info("用户消息: {}", message);
 
+        String cached = chatCacheService.get(sessionId, message);
+        if (cached != null) {
+            metricsService.incrementCacheHit();
+            log.info("返回缓存结果，长度: {} 字符", cached.length());
+            return cached;
+        }
+        metricsService.incrementCacheMiss();
+
         RAGContext ctx = buildRAGContext(message, sessionId);
 
-        String reply = chatClient.prompt()
-                .system(ctx.systemPrompt)
-                .messages(ctx.history)
-                .user(message)
-                .tools(customerTools)
-                .call()
-                .content();
+        HandoffResult hr = evaluateHandoff(message, ctx);
+        if (hr.shouldFallback()) {
+            metricsService.incrementHandoff();
+            String reply = hr.fallbackMessage();
+            sessionService.saveExchange(sessionId, new UserMessage(message), new AssistantMessage(reply));
+            log.info("=== 同步请求结束(人工转接) [{}] ===", sessionId);
+            return reply;
+        }
+
+        String reply = callLlmWithRetry(ctx, message);
+        if (reply == null) {
+            reply = humanHandoffService.getFallbackMessage("LLM 调用失败");
+            metricsService.incrementHandoff();
+        } else {
+            chatCacheService.put(sessionId, message, reply);
+            metricsService.incrementRequestSuccess();
+        }
 
         log.info("模型回复: {}", truncate(reply, 200));
         log.debug("完整回复:\n{}", reply);
@@ -134,17 +179,44 @@ public class ChatController {
     }
 
     @GetMapping("/stream")
-    public SseEmitter chatStream(@RequestParam(defaultValue = "default") String sessionId,
-                                 @RequestParam String message) {
+    @Operation(summary = "SSE 流式聊天", description = "以 Server-Sent Events 方式逐 token 推送回复，首字延迟 ~200ms。" +
+            "事件格式：data {\"content\":\"...\"} 为普通 token，event:done 为结束，event:error 为异常。")
+    @ApiResponse(responseCode = "200", description = "返回 text/event-stream 流",
+            content = @Content(mediaType = "text/event-stream"))
+    public SseEmitter chatStream(
+            @Parameter(description = "会话 ID，用于维持多轮对话上下文", example = "user123")
+            @RequestParam(defaultValue = "default") String sessionId,
+            @Parameter(description = "用户发送的消息", example = "查一下我的订单ORD20240501001", required = true)
+            @RequestParam String message) {
+        metricsService.incrementRequestTotal();
         log.info("=== SSE 请求开始 [{}] ===", sessionId);
         log.info("用户消息: {}", message);
 
         SseEmitter emitter = new SseEmitter(300_000L);
 
         try {
-            RAGContext ctx = buildRAGContext(message, sessionId);
-            StringBuilder fullReply = new StringBuilder();
+            String cached = chatCacheService.get(sessionId, message);
+            if (cached != null) {
+                metricsService.incrementCacheHit();
+                sendSseToken(emitter, cached);
+                sendSseDone(emitter, cached);
+                return emitter;
+            }
+            metricsService.incrementCacheMiss();
 
+            RAGContext ctx = buildRAGContext(message, sessionId);
+
+            HandoffResult hr = evaluateHandoff(message, ctx);
+            if (hr.shouldFallback()) {
+                metricsService.incrementHandoff();
+                sendSseToken(emitter, hr.fallbackMessage());
+                sendSseDone(emitter, hr.fallbackMessage());
+                sessionService.saveExchange(sessionId,
+                        new UserMessage(message), new AssistantMessage(hr.fallbackMessage()));
+                return emitter;
+            }
+
+            StringBuilder fullReply = new StringBuilder();
             chatClient.prompt()
                     .system(ctx.systemPrompt)
                     .messages(ctx.history)
@@ -160,12 +232,13 @@ public class ChatController {
                                             Collections.singletonMap("content", chunk));
                                     emitter.send(SseEmitter.event().data(json));
                                 } catch (IOException e) {
-                                    log.warn("SSE 发送失败，客户端可能已断开: {}", sessionId, e);
+                                    log.warn("SSE 发送失败: {}", sessionId, e);
                                     throw new RuntimeException(e);
                                 }
                             },
                             error -> {
                                 log.error("SSE 流异常 [{}]", sessionId, error);
+                                String fallback = humanHandoffService.getFallbackMessage("SSE 异常");
                                 try {
                                     String errorJson = objectMapper.writeValueAsString(
                                             Map.of("type", "error", "message", error.getMessage()));
@@ -180,18 +253,12 @@ public class ChatController {
                                 log.info("流式响应结束 [{}]，共 {} 字符", sessionId, reply.length());
                                 log.debug("完整回复:\n{}", reply);
 
+                                chatCacheService.put(sessionId, message, reply);
+                                metricsService.incrementRequestSuccess();
                                 sessionService.saveExchange(sessionId,
                                         new UserMessage(message), new AssistantMessage(reply));
                                 log.info("=== SSE 请求结束 [{}] ===", sessionId);
-
-                                try {
-                                    String doneJson = objectMapper.writeValueAsString(
-                                            Map.of("type", "done", "content", reply));
-                                    emitter.send(SseEmitter.event().name("done").data(doneJson));
-                                } catch (IOException e) {
-                                    log.warn("SSE 发送完成事件失败", e);
-                                }
-                                emitter.complete();
+                                sendSseDone(emitter, reply);
                             });
 
             emitter.onCompletion(() -> log.debug("SSE 连接关闭 [{}]", sessionId));
@@ -205,31 +272,71 @@ public class ChatController {
         return emitter;
     }
 
-    private RAGContext buildRAGContext(String message, String sessionId) {
-
-        List<String> queries = queryRewriter.rewrite(message);
-        log.info("查询改写: {} 条查询", queries.size());
-
-        List<Document> vectorDocs = retrieveVector(queries.get(0));
-        log.info("向量检索到 {} 条文档", vectorDocs.size());
-
-        List<Document> bm25Docs = new ArrayList<>();
-        if (bm25Enabled && bm25Index.isBuilt()) {
-            for (String q : queries) {
-                List<Document> docs = bm25Index.search(q, bm25TopK);
-                bm25Docs.addAll(docs);
-                log.debug("BM25 检索 \"{}\" 得到 {} 条", truncate(q, 30), docs.size());
+    private String callLlmWithRetry(RAGContext ctx, String message) {
+        int attempts = 0;
+        while (attempts <= maxRetries) {
+            try {
+                return metricsService.timeLlm(() ->
+                        chatClient.prompt()
+                                .system(ctx.systemPrompt)
+                                .messages(ctx.history)
+                                .user(message)
+                                .tools(customerTools)
+                                .call()
+                                .content());
+            } catch (Exception e) {
+                attempts++;
+                metricsService.incrementRetry();
+                log.warn("LLM 调用失败 (第{}次): {}", attempts, e.getMessage());
+                if (attempts > maxRetries) {
+                    log.error("LLM 调用已达最大重试次数({})", maxRetries);
+                    return null;
+                }
+                log.info("LLM 重试中 ({}/{})...", attempts, maxRetries);
+                try { Thread.sleep(1000L * attempts); } catch (InterruptedException ignored) {}
             }
-            bm25Docs = bm25Docs.stream()
-                    .distinct()
-                    .collect(Collectors.toList());
-            log.info("BM25 多路检索共 {} 条（去重后）", bm25Docs.size());
         }
+        return null;
+    }
 
-        List<Document> fused = fuseResults(vectorDocs, bm25Docs, queries.get(0));
-        log.info("多路融合后：{} 条文档", fused.size());
+    private HandoffResult evaluateHandoff(String message, RAGContext ctx) {
+        boolean hasKnowledge = ctx.systemPrompt.contains("以下是知识库中");
+        List<String> failures = new ArrayList<>();
+        if (!hasKnowledge) failures.add("no_knowledge");
 
-        List<Document> reranked = reRankerService.reRank(queries.get(0), fused);
+        HumanHandoffService.HandoffResult result = humanHandoffService.evaluate(
+                message, hasKnowledge, failures);
+        if (result.shouldHandoff()) {
+            return new HandoffResult(true, result.fallbackMessage());
+        }
+        return new HandoffResult(false, null);
+    }
+
+    private RAGContext buildRAGContext(String message, String sessionId) {
+        List<Document> fused = metricsService.timeRetrieval(() -> {
+            List<String> queries = queryRewriter.rewrite(message);
+            log.info("查询改写: {} 条查询", queries.size());
+
+            List<Document> vectorDocs = retrieveVector(queries.get(0));
+            log.info("向量检索到 {} 条文档", vectorDocs.size());
+
+            List<Document> bm25Docs = new ArrayList<>();
+            if (bm25Enabled && bm25Index.isBuilt()) {
+                for (String q : queries) {
+                    List<Document> docs = bm25Index.search(q, bm25TopK);
+                    bm25Docs.addAll(docs);
+                    log.debug("BM25 检索 \"{}\" 得到 {} 条", truncate(q, 30), docs.size());
+                }
+                bm25Docs = bm25Docs.stream().distinct().collect(Collectors.toList());
+                log.info("BM25 多路检索共 {} 条（去重后）", bm25Docs.size());
+            }
+
+            List<Document> fusedDocs = fuseResults(vectorDocs, bm25Docs);
+            log.info("多路融合后：{} 条文档", fusedDocs.size());
+            return fusedDocs;
+        });
+
+        List<Document> reranked = reRankerService.reRank(message, fused);
         log.info("重排序后保留 {} 条文档", reranked.size());
 
         String systemPrompt;
@@ -258,41 +365,29 @@ public class ChatController {
                 SearchRequest.builder().query(query).topK(vectorTopK).build());
     }
 
-    private List<Document> fuseResults(List<Document> vectorDocs, List<Document> bm25Docs, String query) {
-        if (!bm25Enabled || bm25Docs.isEmpty()) {
-            return vectorDocs;
-        }
-        if (vectorDocs.isEmpty()) {
-            return bm25Docs;
-        }
+    private List<Document> fuseResults(List<Document> vectorDocs, List<Document> bm25Docs) {
+        if (!bm25Enabled || bm25Docs.isEmpty()) return vectorDocs;
+        if (vectorDocs.isEmpty()) return bm25Docs;
 
         Map<String, Document> docMap = new LinkedHashMap<>();
         Map<String, Double> rrfScores = new HashMap<>();
 
-        Set<String> vectorIds = new LinkedHashSet<>();
         for (int i = 0; i < vectorDocs.size(); i++) {
             String id = docId(vectorDocs.get(i), i + "_v");
-            vectorIds.add(id);
             docMap.put(id, vectorDocs.get(i));
             rrfScores.merge(id, vectorWeight / (RRF_K + i + 1), Double::sum);
         }
-        log.debug("RRF 向量贡献: {} 条", vectorIds.size());
 
-        Set<String> bm25Ids = new LinkedHashSet<>();
         for (int i = 0; i < bm25Docs.size(); i++) {
             String id = docId(bm25Docs.get(i), i + "_b");
-            bm25Ids.add(id);
-            if (!docMap.containsKey(id)) {
-                docMap.put(id, bm25Docs.get(i));
-            }
+            if (!docMap.containsKey(id)) docMap.put(id, bm25Docs.get(i));
             rrfScores.merge(id, bm25Weight / (RRF_K + i + 1), Double::sum);
         }
-        log.debug("RRF BM25 贡献: {} 条", bm25Ids.size());
 
-        int overlap = 0;
-        for (String id : vectorIds) {
-            if (bm25Ids.contains(id)) overlap++;
-        }
+        int overlap = (int) vectorDocs.stream()
+                .filter(d -> bm25Docs.stream().anyMatch(b -> docId(d, "").equals(docId(b, ""))))
+                .count();
+
         log.info("RRF 融合: 向量{}条 + BM25{}条 = {}条唯一(交集{}), topK={}",
                 vectorDocs.size(), bm25Docs.size(), docMap.size(), overlap, fusionTopK);
 
@@ -304,13 +399,33 @@ public class ChatController {
     }
 
     private String docId(Document doc, String fallback) {
+        Object docId = doc.getMetadata().get("doc_id");
+        if (docId != null) return docId.toString();
         Object id = doc.getMetadata().get("id");
         if (id != null) return id.toString();
         String text = doc.getText();
-        if (text != null && text.length() > 20) {
-            return text.substring(0, 20);
-        }
+        if (text != null && text.length() > 20) return text.substring(0, 20);
         return fallback;
+    }
+
+    private void sendSseToken(SseEmitter emitter, String content) {
+        try {
+            String json = objectMapper.writeValueAsString(Collections.singletonMap("content", content));
+            emitter.send(SseEmitter.event().data(json));
+        } catch (IOException e) {
+            log.warn("SSE 发送失败", e);
+        }
+    }
+
+    private void sendSseDone(SseEmitter emitter, String fullReply) {
+        try {
+            String doneJson = objectMapper.writeValueAsString(
+                    Map.of("type", "done", "content", fullReply));
+            emitter.send(SseEmitter.event().name("done").data(doneJson));
+        } catch (IOException e) {
+            log.warn("SSE 发送完成事件失败", e);
+        }
+        emitter.complete();
     }
 
     private String truncate(String text, int maxLen) {
@@ -320,4 +435,6 @@ public class ChatController {
     }
 
     private record RAGContext(String systemPrompt, List<Message> history) {}
+
+    private record HandoffResult(boolean shouldFallback, String fallbackMessage) {}
 }
