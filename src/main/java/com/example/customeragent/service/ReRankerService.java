@@ -19,9 +19,15 @@ public class ReRankerService {
     private static final double KEYWORD_WEIGHT = 0.3;
 
     private final int topK;
+    private final boolean useCrossEncoder;
+    private final DashScopeReranker dashScopeReranker;
 
-    public ReRankerService(@Value("${app.reranker.top-k:3}") int topK) {
+    public ReRankerService(@Value("${app.reranker.top-k:3}") int topK,
+                           @Value("${app.reranker.type:hybrid}") String type,
+                           DashScopeReranker dashScopeReranker) {
         this.topK = topK;
+        this.useCrossEncoder = "cross-encoder".equalsIgnoreCase(type);
+        this.dashScopeReranker = dashScopeReranker;
     }
 
     public List<Document> reRank(String query, List<Document> documents) {
@@ -30,13 +36,26 @@ public class ReRankerService {
             return List.of();
         }
 
-        log.info("重排序输入: {} 条文档, 查询: \"{}\"", documents.size(), truncate(query, 50));
+        log.info("重排序输入: {} 条文档, 模式: {}, 查询: \"{}\"",
+                documents.size(), useCrossEncoder ? "交叉编码器" : "混合(Hybrid)", truncate(query, 50));
 
         if (documents.size() <= topK) {
             log.info("文档数({}) <= topK({}), 跳过重排序", documents.size(), topK);
             return documents;
         }
 
+        if (useCrossEncoder) {
+            List<Document> reranked = dashScopeReranker.rerank(query, documents);
+            if (reranked.size() != documents.size()) {
+                log.info("交叉编码器返回 {} 条（取 top{}）", reranked.size(), topK);
+            }
+            return reranked;
+        }
+
+        return hybridRerank(query, documents);
+    }
+
+    private List<Document> hybridRerank(String query, List<Document> documents) {
         Set<String> queryTerms = tokenize(query);
         log.debug("查询分词: {}", queryTerms);
 
@@ -53,24 +72,22 @@ public class ReRankerService {
                                 String.format("%.4f", combined),
                                 truncate(doc.getText(), 60));
                     }
+                    doc.getMetadata().put("hybrid_score", String.valueOf(combined));
                     return new AbstractMap.SimpleEntry<>(doc, combined);
                 })
                 .sorted(Map.Entry.<Document, Double>comparingByValue().reversed())
                 .collect(Collectors.toList());
 
         int showIdx = Math.min(topK, scored.size()) - 1;
-        log.info("重排序完成, top1: {}, top{}: {}",
+        log.info("混合重排序完成, top1: {}, top{}: {}",
                 String.format("%.4f", scored.get(0).getValue()),
                 showIdx + 1,
                 String.format("%.4f", scored.get(showIdx).getValue()));
 
-        List<Document> result = scored.stream()
+        return scored.stream()
                 .limit(topK)
                 .map(Map.Entry::getKey)
                 .collect(Collectors.toList());
-
-        log.info("重排序输出: {} 条文档", result.size());
-        return result;
     }
 
     private String truncate(String text, int maxLen) {
