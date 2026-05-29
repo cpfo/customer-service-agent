@@ -6,7 +6,6 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
-import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
@@ -26,7 +25,10 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
@@ -46,7 +48,9 @@ public class ChatController {
             4. 涉及退换货、退款时，清晰说明条件和流程
             5. 结合对话历史理解用户问题的上下文
             6. 不要暴露内部系统细节
-            7. 你可以使用提供的工具查询订单状态、物流信息、处理退货申请
+             7. 你可以使用提供的工具查询订单状态、物流信息、处理退货申请
+             8. 查询用户信息时，使用 MCP 服务器提供的用户工具
+             9. 查询账单记录时，使用 MCP 服务器提供的账单工具
 
             以下是知识库中与用户问题相关的内容：
             ---------------------
@@ -60,14 +64,13 @@ public class ChatController {
             如果用户的问题能通过已有对话历史回答，请正常回答。
             否则，知识库中暂未找到与用户问题直接相关的信息，请礼貌告知用户，
             并建议联系人工客服（热线 400-888-8888）获取更准确的帮助。
-            不要编造信息。你可以使用提供的工具查询订单状态、物流信息、处理退货申请。
-            """;
+             不要编造信息。你可以使用提供的工具查询订单状态、物流信息、处理退货申请、查询用户信息、查询账单记录。
+             """;
 
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
     private final ReRankerService reRankerService;
     private final SessionService sessionService;
-    private final CustomerTools customerTools;
     private final QueryRewriter queryRewriter;
     private final ContextCompressor contextCompressor;
     private final ChatCacheService chatCacheService;
@@ -83,7 +86,6 @@ public class ChatController {
                           VectorStore vectorStore,
                           ReRankerService reRankerService,
                           SessionService sessionService,
-                          CustomerTools customerTools,
                           QueryRewriter queryRewriter,
                           ContextCompressor contextCompressor,
                           ChatCacheService chatCacheService,
@@ -98,7 +100,6 @@ public class ChatController {
         this.vectorStore = vectorStore;
         this.reRankerService = reRankerService;
         this.sessionService = sessionService;
-        this.customerTools = customerTools;
         this.queryRewriter = queryRewriter;
         this.contextCompressor = contextCompressor;
         this.chatCacheService = chatCacheService;
@@ -204,7 +205,7 @@ public class ChatController {
                     .system(ctx.systemPrompt)
                     .messages(ctx.history)
                     .user(message)
-                    .tools(customerTools)
+//                    .tools(customerTools)
                     .stream()
                     .content()
                     .subscribe(
@@ -264,7 +265,7 @@ public class ChatController {
                                 .system(ctx.systemPrompt)
                                 .messages(ctx.history)
                                 .user(message)
-                                .tools(customerTools)
+//                                .tools(customerTools)
                                 .call()
                                 .content());
             } catch (Exception e) {

@@ -1,4 +1,6 @@
 spring:
+  main:
+    web-application-type: servlet
   ai:
     dashscope:
       api-key: ${AI_DASHSCOPE_API_KEY}
@@ -8,6 +10,19 @@ spring:
       embedding:
         options:
           model: text-embedding-v3
+
+    mcp:
+      client:
+        enabled: true
+        type: sync                   # 可选 sync 或 async
+        request-timeout: 60s          # 请求超时时间
+        toolcallback:
+          enabled: true               # 自动将远端工具封装为 ToolCallbackProvider
+        streamable-http:
+          connections:
+            fastapi-mcp-server: # 连接名称，可自定义
+              url: http://localhost:8081  # MCP Server 基础地址
+              endpoint: /mcp  # MCP Server 监听的端点路径
 
   redis:
     host: localhost
